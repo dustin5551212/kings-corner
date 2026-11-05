@@ -1,0 +1,13 @@
+[project]
+name = "kings-corner"
+version = "0.1.0"
+description = "Kings Corners — Bicycle's rules, two to four players, one table."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+kings-corner = "kings_corner.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
