@@ -696,7 +696,7 @@ function showOverlay(view) {
   if (view.over) {
     const winners = view.seats.filter((s) => s.won === best).map((s) => s.name);
     title = winners.length > 1 ? `${winners.join(" & ")} share the match` : `${winners[0]} wins the match`;
-    note = `${view.deals} deals — ${best} to ${winners.length > 1 ? "each" : "them"}`;
+    note = `${view.deals} deal${view.deals === 1 ? "" : "s"} — ${best} to ${winners.length > 1 ? "each" : "them"}`;
     button = '<button data-act="new-table" class="solid">Open a fresh table</button>';
   } else {
     button = '<button data-act="next-deal" class="solid">Next deal &rarr;</button>';
