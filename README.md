@@ -16,6 +16,10 @@ Kings Corner  ·  a table for two to four
 
 ## Run
 
+**Play it now:** <http://jensen-shifted.tun.ply.gg:7251> — the same table, served from this
+machine through a playit.gg tunnel, so it works from a phone. On the machine itself it is
+<http://localhost:5175>.
+
 ```sh
 .venv/bin/python -m kings_corner.server        # → http://localhost:5175
 .venv/bin/python -m kings_corner.server 5176   # another port
