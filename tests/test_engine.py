@@ -15,6 +15,7 @@ from kings_corner.engine import (
     can_move,
     can_play,
     create_match,
+    is_bot,
     legal_actions,
     make_rng,
 )
@@ -233,6 +234,25 @@ def test_between_deals_any_seat_may_deal_the_next_one():
     state.deal = 1
     apply(state, 1, {"type": "next-deal"})
     assert state.deal == 2 and state.phase == "draw"
+
+
+def test_a_seat_can_be_a_cpu():
+    state = create_match(seats=[{"name": "Ada"}, {"name": "CPU 1", "bot": True}], seed=2)
+    assert [s["name"] for s in state.seats] == ["Ada", "CPU 1"]
+    assert [s["bot"] for s in state.seats] == [False, True]
+    assert is_bot(state, 1) and not is_bot(state, 0)
+    # A seat number that is not a seat is not a CPU either.
+    assert is_bot(state, 9) is False
+
+
+def test_a_mixed_table_still_deals_seven_each():
+    """The people/CPU mix is a seating question; the deal does not care."""
+    state = create_match(
+        seats=[{"name": "Ada"}, {"name": "CPU 1", "bot": True}, {"name": "CPU 2", "bot": True}],
+        seed=8,
+    )
+    assert [len(h) for h in state.hands] == [HAND] * 3
+    assert len(state.stock) == 52 - HAND * 3 - 4
 
 
 def test_a_seat_count_outside_two_to_four_is_refused():

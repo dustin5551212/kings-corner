@@ -1,6 +1,7 @@
 """A decent, deterministic bot — good enough to reach every code path.
 
-Used by the test suites and by ``python -m kings_corner``.  The policy is greedy
+Used by the test suites, by ``python -m kings_corner``, and for the CPU seats at a
+table when one person wants a game without waiting for friends.  The policy is greedy
 and honest about it: dump kings into empty corners, play anything that fits,
 consolidate piles to free a foundation, then use a freed foundation for a card
 with no other home.  It never buries a king, because a king at the bottom of a

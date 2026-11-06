@@ -5,12 +5,15 @@ four corners that only a king may open. Built to the rules on
 [bicyclecards.com](https://bicyclecards.com/how-to-play/kings-corner), in Python, with
 the same felt, gold and Georgia as `professional-500` and `golf`.
 
+Any of the seats can be a CPU, so one person can sit down and play a full four-seat
+game without waiting for anybody. Three CPUs is the most a table can hold.
+
 ```
 Kings Corner  ·  a table for two to four
-  engine.py    the rules
+  engine.py    the rules (a seat may be flagged as a CPU; the rules never look)
   view.py      the redaction boundary (other hands are a count, never cards)
-  server.py    rooms, seats, SSE + poll fallback
-  policy.py    the deterministic bot behind the CLI and the tests
+  server.py    rooms, seats, the CPU driver, SSE + poll fallback
+  policy.py    the deterministic bot behind the CLI, the tests and the CPUs
   public/      the browser client
 ```
 
@@ -35,13 +38,21 @@ golf, 5175 this.
 Open the page, name yourself, pick two to four seats and three to seven deals, then
 send the invite link round. The first hand waits for every seat; anyone can deal.
 
+**To play on your own**, pick four seats and three CPUs (or two seats and one CPU for a
+quick game): the CPUs take the back seats, so the deal button is live immediately. In
+the waiting room *Add a CPU* / *Remove a CPU* rearrange the empty seats until the first
+deal — useful when a friend does not show up, or does. CPUs play the same `policy.py`
+the tests use, one action every 0.45s (`KINGS_CORNERS_BOT_PACE` changes that), and they
+never touch the table between hands: you press **Next deal**.
+
 Standard library only. Development needs `pytest`:
 
 ```sh
 uv venv --python /usr/bin/python3 .venv
 uv pip install --python .venv/bin/python pytest
-.venv/bin/python -m pytest                      # 39 tests
+.venv/bin/python -m pytest                      # 48 tests
 .venv/bin/python tools/e2e_api.py http://127.0.0.1:5175 --seats 3 --deals 3
+.venv/bin/python tools/e2e_api.py http://127.0.0.1:5175 --seats 4 --bots 3
 ```
 
 ## The rules, as this table plays them
@@ -76,13 +87,13 @@ down rather than assumed:
 
 | Check | Command | Result |
 |---|---|---|
-| Rules, in Python idiom | `.venv/bin/python -m pytest tests/test_engine.py` | 19 tests |
+| Rules, in Python idiom | `.venv/bin/python -m pytest tests/test_engine.py` | 21 tests |
 | Redaction boundary | `... tests/test_view.py` | 4 tests, including a leak sweep over every seat of full matches |
 | Joined system | `... tests/test_system.py` | 52 distinct cards at every step, same seed → same match, every bot action accepted |
-| Transport | `... tests/test_server.py` | 7 tests: rooms, deals, refusals, polling, a real SSE stream |
+| Transport | `... tests/test_server.py` | 14 tests: rooms, deals, refusals, polling, a real SSE stream, CPU seats and the CPU driver |
 | Headless match | `... tests/test_cli.py` | scorecard, determinism, tracing |
 | A careless client | `... tests/test_system.py::test_a_naive_picker_cannot_loop_forever` | first-legal-action play never loops |
-| Black box, over HTTP | `tools/e2e_api.py` | full matches driven through join/deal/action/state |
+| Black box, over HTTP | `tools/e2e_api.py` | full matches driven through join/deal/action/state, people or CPUs |
 
 `test_a_naive_picker_cannot_loop_forever` exists because it caught a real bug: a king
 could be moved from one empty corner to another, so a client that always takes the
@@ -107,15 +118,20 @@ there rather than deleting fields off an engine state.
 - **The heartbeat is the transport.** The EventSource is opened and helps on a LAN, but
   nothing depends on it: a tunnel that buffers the stream would otherwise show a table
   that never moves.
+- **CPUs are seats with `bot=True`, and one thread plays them all.** `run_bots` walks
+  every room every 120ms and lets `step_bot` take *one* policy action for the seat whose
+  turn it is; `room.bot_ready_at` is what makes that read as thinking rather than a
+  jump-cut. Rooms carry a lock (`room.lock`) because a click and a CPU can land at the
+  same instant — mutate and `broadcast` inside it, never around it.
 - **`isolation:isolate` on `.pilecards` and `z-index:60` on `#overlay`** are load
   bearing: pile cards carry their own z-index, so without them the deal summary paints
   under the table.
 
 ## Not covered
 
-- **No bots at the table.** `policy.py` plays headless matches and drives the tests; the
-  server fills seats with people, as golf does. A "play against the house" seat would be
-  the next feature, not a fix.
+- **Only the greedy policy is a CPU.** `policy.py` is a decent opponent, not a strong
+  one: it never plans a hand ahead, and it will play a card that blocks a corner it
+  could have opened. A better seat is a policy change, not a server change.
 - **No persistence.** A restart loses open rooms — room codes live in memory, and the
   match is deliberately short enough for that to be fine.
 - **One thread per connection** (`ThreadingHTTPServer`). Right for four people, wrong

@@ -31,12 +31,12 @@ def view(state: State, seat: int, extra: dict | None = None) -> dict:
         "hand": [_public_card(c) for c in state.hands[seat]],
         # Everybody else is a count. Nothing else about a hand leaves the server.
         "others": [
-            {"seat": i, "name": s["name"], "count": len(state.hands[i])}
+            {"seat": i, "name": s["name"], "count": len(state.hands[i]), "bot": bool(s.get("bot"))}
             for i, s in enumerate(state.seats)
             if i != seat
         ],
         "seats": [
-            {"seat": i, "name": s["name"], "won": s["won"]}
+            {"seat": i, "name": s["name"], "won": s["won"], "bot": bool(s.get("bot"))}
             for i, s in enumerate(state.seats)
         ],
         "piles": [

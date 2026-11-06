@@ -4,8 +4,9 @@
 
 Design, in one paragraph: the server owns the deck.  Clients are thin — they
 receive their own view (``view.py``) and post actions.  There is no host, a table
-is 2 to 4 people, the first deal waits until every seat is taken, and nothing on
-the wire is a card somebody is not allowed to see.
+is 2 to 4 seats, any of the tail seats may be a CPU (``policy.py``) so one person
+can play alone, the first deal waits until every *person's* seat is taken, and
+nothing on the wire is a card somebody is not allowed to see.
 
 Transport is Server-Sent Events for pushes and a poll fallback, because a tunnel
 that buffers a stream still has to let people play.  Standard library only: no
@@ -23,9 +24,11 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .engine import DEALS, MAX_SEATS, MIN_SEATS, RuleError, apply, create_match
+from .policy import choose_action
 from .view import view
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -101,6 +104,8 @@ class Seat:
         self.name: str | None = None
         self.peer = Peer()
         self.joined = False
+        #: True when nobody is sitting here: the server plays this hand with policy.py.
+        self.bot = False
 
 
 class Room:
@@ -109,8 +114,13 @@ class Room:
         self.size = size
         self.deals = deals
         self.seats = [Seat() for _ in range(size)]
-        self.game = None
+        self.game: Any = None
         self.touched = time.monotonic()
+        #: One mutation at a time: the bot thread and the request threads share the game.
+        self.lock = threading.RLock()
+        #: The earliest moment the bot to move may act — this is the CPU's "thinking".
+        self.bot_ready_at = 0.0
+        self.bots = 0
 
 
 def make_id(alphabet: str, length: int) -> str:
@@ -135,6 +145,49 @@ def clean_name(raw, fallback: str) -> str:
 
 def make_room(size: int, deals: int = DEALS) -> Room:
     return Room(make_code(), size, deals)
+
+
+# ── CPU seats ───────────────────────────────────────────────────────────
+
+#: How long a CPU sits before it acts, in seconds. Long enough to see it happen.
+#: ``KINGS_CORNERS_BOT_PACE`` overrides it — the test suite thinks fast.
+BOT_PACE_S = float(os.environ.get("KINGS_CORNERS_BOT_PACE") or 0.45)
+#: How often the bot thread looks for a CPU to move.
+BOT_TICK_S = float(os.environ.get("KINGS_CORNERS_BOT_TICK") or 0.12)
+
+
+def bot_name(n: int) -> str:
+    return f"CPU {n}"
+
+
+def apply_bots(room: Room, count: Any) -> int:
+    """Fill the last ``count`` seats with CPUs, keeping every person where they are.
+
+    People always sit from the front, CPUs always from the back, so a seat number
+    never changes hands between the two kinds.  The count is clamped to leave at
+    least one person at the table — a table of CPUs is not a game anybody is in.
+    """
+    try:
+        wanted = int(count)
+    except (TypeError, ValueError):
+        wanted = 0
+    with room.lock:
+        humans = [s for s in room.seats if not s.bot]
+        sitting = sum(1 for s in humans if s.joined)
+        wanted = max(0, min(wanted, room.size - max(1, sitting)))
+        humans = humans[: room.size - wanted]
+        while len(humans) < room.size - wanted:
+            humans.append(Seat())
+        room.seats = humans
+        for n in range(wanted):
+            cpu = Seat()
+            cpu.bot = True
+            cpu.joined = True
+            cpu.name = bot_name(n + 1)
+            room.seats.append(cpu)
+        room.bots = wanted
+        room.touched = time.monotonic()
+    return wanted
 
 
 # ── delivery ────────────────────────────────────────────────────────────
@@ -163,29 +216,38 @@ def deliver(room: Room, seat: int, message: dict) -> bool:
 
 def presence_of(room: Room) -> list[dict]:
     return [
-        {"joined": s.joined and bool(s.name), "live": seat_live(room, i), "name": s.name}
+        {
+            "joined": s.joined and bool(s.name),
+            # A CPU is always at the table: there is no connection to lose.
+            "live": True if s.bot else seat_live(room, i),
+            "name": s.name,
+            "bot": s.bot,
+        }
         for i, s in enumerate(room.seats)
     ]
 
 
 def broadcast(room: Room) -> None:
     """Push the right view to the right player. Every seat gets its own redaction."""
-    presence = presence_of(room)
-    for i, seat in enumerate(room.seats):
-        if not seat.joined:
-            continue
-        extra = {
-            "code": room.code,
-            "seatCount": room.size,
-            "deals": room.deals,
-            "presence": presence,
-            "started": bool(room.game),
-            "waiting": sum(1 for s in room.seats if not s.joined),
-        }
-        if not room.game:
-            deliver(room, i, {"type": "lobby", "you": i, **extra})
-            continue
-        deliver(room, i, {"type": "view", **extra, "view": view(room.game, i)})
+    with room.lock:
+        presence = presence_of(room)
+        for i, seat in enumerate(room.seats):
+            if not seat.joined or seat.bot:
+                continue
+            extra = {
+                "code": room.code,
+                "seatCount": room.size,
+                "deals": room.deals,
+                "presence": presence,
+                "started": bool(room.game),
+                "waiting": sum(1 for s in room.seats if not s.joined),
+                "bots": sum(1 for s in room.seats if s.bot),
+            }
+            if not room.game:
+                deliver(room, i, {"type": "lobby", "you": i, **extra})
+                continue
+            deliver(room, i, {"type": "view", **extra, "view": view(room.game, i)})
+
 
 
 def seat_for_token(room: Room | None, token: str | None) -> int:
@@ -314,6 +376,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 deals = DEALS
             deals = max(1, min(20, deals))
+            # CPUs fill the back of the table. Four seats and three CPUs is a game on
+            # your own; zero CPUs is the old "wait for your friends" table.
+            bots = query.get("bots") or 0
             fresh = make_room(size, deals)
             rooms[fresh.code] = fresh
             token = make_id(TOKEN_ALPHABET, 24)
@@ -321,18 +386,21 @@ class Handler(BaseHTTPRequestHandler):
             fresh.seats[0].token = token
             fresh.seats[0].name = clean_name(query.get("name"), "Player 1")
             fresh.seats[0].joined = True
+            bots = apply_bots(fresh, bots)
             broadcast(fresh)
             self.json(200, {
                 "code": fresh.code,
                 "token": token,
                 "seat": 0,
                 "seats": size,
+                "bots": bots,
                 "deals": deals,
                 "publicUrl": public_url(),
                 "lan": lan_address(),
                 "port": self.server.port,  # type: ignore[attr-defined]
             })
             return True
+
 
         if path == "/api/join" and method == "POST":
             if room is None:
@@ -349,7 +417,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(409, {"error": "that game has already started"})
                 return True
             wanted = seat_for_token(room, query.get("token")) if query.get("token") else -1
-            seat_index = wanted if wanted >= 0 else next((i for i, s in enumerate(room.seats) if not s.joined), -1)
+            seat_index = wanted if wanted >= 0 else next(
+                (i for i, s in enumerate(room.seats) if not s.joined and not s.bot), -1
+            )
             if seat_index < 0:
                 self.json(409, {"error": "that table is full"})
                 return True
@@ -375,16 +445,43 @@ class Handler(BaseHTTPRequestHandler):
             if seat < 0:
                 self.json(403, {"error": "not at this table"})
                 return True
-            if room.game:
-                self.json(409, {"error": "already dealt"})
-                return True
-            if any(not s.joined for s in room.seats):
-                self.json(409, {"error": "every seat has to be filled before the deal"})
-                return True
-            room.game = create_match(seats=[s.name for s in room.seats], deals=room.deals)
-            broadcast(room)
+            with room.lock:
+                if room.game:
+                    self.json(409, {"error": "already dealt"})
+                    return True
+                # CPU seats are joined the moment they are dealt in, so this is still
+                # "every seat is filled" — some of the seats just cannot answer.
+                if any(not s.joined for s in room.seats):
+                    self.json(409, {"error": "every seat has to be filled before the deal"})
+                    return True
+                room.game = create_match(
+                    seats=[{"name": s.name, "bot": s.bot} for s in room.seats], deals=room.deals
+                )
+                # Let the table land before a CPU leads.
+                room.bot_ready_at = time.monotonic() + BOT_PACE_S
+                room.touched = time.monotonic()
+                broadcast(room)
             self.json(200, {"ok": True, "deal": room.game.deal, "deals": room.deals})
             return True
+
+        if path == "/api/bots" and method == "POST":
+            # Before the first deal, the table is still being set: swap empty seats for
+            # CPUs (or back) without asking everyone to open a new room.
+            if room is None:
+                self.json(404, {"error": "no such room"})
+                return True
+            if seat_for_token(room, query.get("token")) < 0:
+                self.json(403, {"error": "not at this table"})
+                return True
+            with room.lock:
+                if room.game:
+                    self.json(409, {"error": "the deal has started"})
+                    return True
+                count = apply_bots(room, query.get("bots") or 0)
+                broadcast(room)
+            self.json(200, {"ok": True, "bots": count, "seats": room.size})
+            return True
+
 
         if path == "/api/action" and method == "POST":
             if room is None:
@@ -403,7 +500,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(400, {"error": str(exc)})
                 return True
             try:
-                apply(room.game, seat, body)
+                with room.lock:
+                    apply(room.game, seat, body)
+                    room.touched = time.monotonic()
+                    broadcast(room)
             except RuleError as exc:
                 self.json(400, {"error": str(exc)})
                 return True
@@ -411,10 +511,9 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
                 self.json(500, {"error": "internal error"})
                 return True
-            room.touched = time.monotonic()
-            broadcast(room)
             self.json(200, {"ok": True})
             return True
+
 
         # One-shot state for a seat, without touching its stream. A freshly opened SSE
         # connection can sit in a proxy's buffer for a moment; this makes the table appear
@@ -494,6 +593,7 @@ class Handler(BaseHTTPRequestHandler):
             "presence": presence_of(room),
             "started": bool(room.game),
             "waiting": sum(1 for s in room.seats if not s.joined),
+            "bots": sum(1 for s in room.seats if s.bot),
         }
 
     def stream(self, room: Room, seat: int) -> None:
@@ -542,6 +642,7 @@ class KingsServer(ThreadingHTTPServer):
     def __init__(self, addr, handler, port: int):
         super().__init__(addr, handler)
         self.port = port
+        start_threads()
 
 
 def reap_peers() -> None:
@@ -571,6 +672,77 @@ def reap_rooms() -> None:
                     del rooms[code]
 
 
+# ── the CPUs ────────────────────────────────────────────────────────────
+
+
+def _bot_recover(game: Any, seat: int) -> None:
+    """Never let a CPU wedge the table: give the turn back, whatever state it is in."""
+    for action in ({"type": "draw"}, {"type": "end-turn"}):
+        try:
+            apply(game, seat, action)
+        except RuleError:
+            pass
+
+
+def step_bot(room: Room) -> bool:
+    """Take one action for a CPU, if it is a CPU's turn and its pause is up."""
+    game = room.game
+    if game is None or game.phase == "done":
+        return False
+    seat = game.turn
+    if seat >= len(room.seats) or not room.seats[seat].bot:
+        return False
+    if time.monotonic() < room.bot_ready_at:
+        return False
+
+    with room.lock:
+        # Re-read under the lock: a person's action may have moved the turn on.
+        game = room.game
+        if game is None or game.phase == "done":
+            return False
+        seat = game.turn
+        if seat >= len(room.seats) or not room.seats[seat].bot:
+            return False
+        action = choose_action(game, seat)
+        if action is None:
+            return False
+        try:
+            apply(game, seat, action)
+        except RuleError:
+            traceback.print_exc()
+            _bot_recover(game, seat)
+        room.bot_ready_at = time.monotonic() + BOT_PACE_S
+        room.touched = time.monotonic()
+        broadcast(room)
+    return True
+
+
+def run_bots() -> None:
+    """One thread for every CPU at every table: they are cheap, and mostly waiting."""
+    while True:
+        time.sleep(BOT_TICK_S)
+        with rooms_lock:
+            tables = list(rooms.values())
+        for room in tables:
+            try:
+                step_bot(room)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+
+
+_threads_started = False
+
+
+def start_threads() -> None:
+    """Background workers are per-process, not per-server: tests build many servers."""
+    global _threads_started
+    if _threads_started:
+        return
+    _threads_started = True
+    for fn in (reap_peers, reap_rooms, run_bots):
+        threading.Thread(target=fn, daemon=True, name=fn.__name__).start()
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     port = 5175
@@ -583,9 +755,11 @@ def main(argv: list[str] | None = None) -> int:
         host = argv[argv.index("--host") + 1]
 
     server = KingsServer((host, port), Handler, port)
-    threading.Thread(target=reap_peers, daemon=True).start()
-    threading.Thread(target=reap_rooms, daemon=True).start()
-    print(f"Kings Corners \u2192 http://localhost:{port}  (pid {os.getpid()}, {MIN_SEATS}-{MAX_SEATS} seats)", flush=True)
+    print(
+        f"Kings Corners \u2192 http://localhost:{port}  "
+        f"(pid {os.getpid()}, {MIN_SEATS}-{MAX_SEATS} seats, up to {MAX_SEATS - 1} CPUs)",
+        flush=True,
+    )
     print(f"  same table on this network \u2192 http://{lan_address()}:{port}/", flush=True)
     try:
         server.serve_forever()

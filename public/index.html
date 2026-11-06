@@ -27,8 +27,9 @@
         <div class="sub">bicycle rules · 2–4</div>
       </header>
 
-      <p class="lobby-lede">Two to four at a table, each on their own device. Build down, red on
-        black, kings into the corners — first hand empty takes the deal.</p>
+      <p class="lobby-lede">Two to four at a table, each on their own device — or fill the
+        empty seats with CPUs and play on your own. Build down, red on black, kings into
+        the corners, first hand empty takes the deal.</p>
 
       <div class="tabs">
         <button id="tabCreate" class="on">New table</button>
@@ -41,9 +42,17 @@
         </label>
         <label class="field"><span>Seats at the table</span>
           <select id="seatPick">
-            <option value="2">Two players</option>
-            <option value="3" selected>Three players</option>
-            <option value="4">Four players</option>
+            <option value="2">Two seats</option>
+            <option value="3" selected>Three seats</option>
+            <option value="4">Four seats</option>
+          </select>
+        </label>
+        <label class="field"><span>CPU players</span>
+          <select id="botPick">
+            <option value="0" selected>None — people only</option>
+            <option value="1">1 CPU</option>
+            <option value="2">2 CPUs</option>
+            <option value="3">3 CPUs</option>
           </select>
         </label>
         <label class="field"><span>Deals in the match</span>
@@ -53,8 +62,8 @@
             <option value="7">Seven deals</option>
           </select>
         </label>
-        <p class="hintline">The first deal waits until every seat is filled, so a table can sit
-          open while you send the link round.</p>
+        <p class="hintline" id="seatHint">No CPUs: the deal waits until every seat is filled,
+          so a table can sit open while you send the link round.</p>
         <button class="solid" id="createBtn">Open a table</button>
       </div>
 
@@ -91,14 +100,19 @@
 
       <div class="seatlist" id="waitSeats"></div>
 
-      <div class="invite">
+      <div class="row tight seatctl">
+        <button id="addCpu">Add a CPU</button>
+        <button id="removeCpu">Remove a CPU</button>
+      </div>
+
+      <div class="invite" id="inviteBox">
         <div class="lab">Send this to the others</div>
         <div class="url" id="inviteUrl">…</div>
         <button id="copyBtn">Copy link</button>
       </div>
 
-      <p class="hintline" style="margin-top:14px">The deal waits for every seat. Once everyone is
-        in, anyone can press <b>Deal</b>.</p>
+      <p class="hintline" style="margin-top:14px" id="waitHint">The deal waits for every
+        seat. Once everyone is in, anyone can press <b>Deal</b>.</p>
       <button class="solid" id="dealBtn" disabled>Deal the first hand</button>
       <div class="err" id="waitErr"></div>
       <div id="connWait"></div>
@@ -249,6 +263,7 @@ const S = {
   token: null,
   seat: null,
   message: null,
+  lobby: null,
   view: null,
   presence: [],
   es: null,
@@ -256,6 +271,8 @@ const S = {
   retries: 0,
   online: false,
   stolen: false,
+  /** True while a CPU change is in flight: the lobby message clears it. */
+  busy: false,
   /** What the player has picked up: {kind:"hand", i} or {kind:"pile", p}. */
   sel: null,
   sig: null,
@@ -304,12 +321,13 @@ async function api(path, { method = "GET", body } = {}) {
 async function createTable() {
   const name = $("nameCreate").value.trim();
   const seats = Number($("seatPick").value);
+  const bots = Number($("botPick").value);
   const deals = Number($("dealPick").value);
   if (name.length < 2) return fail("lobbyErr", "Give yourself a name first.");
   store.name = name;
   try {
     const room = await api(
-      `/api/room?name=${encodeURIComponent(name)}&seats=${seats}&deals=${deals}`,
+      `/api/room?name=${encodeURIComponent(name)}&seats=${seats}&bots=${bots}&deals=${deals}`,
       { method: "POST" },
     );
     S.code = room.code;
@@ -321,6 +339,29 @@ async function createTable() {
     fail("lobbyErr", networkish(error) ? cannotReach() : error.message);
   }
 }
+
+/**
+ * A CPU needs a seat to sit in, so "3 CPUs" is only offered when there are four seats.
+ * Keeping the pick honest here means the server never has to refuse it.
+ */
+function syncCpuOptions() {
+  const seats = Number($("seatPick").value);
+  const most = seats - 1;
+  for (const option of $("botPick").options) {
+    option.disabled = Number(option.value) > most;
+  }
+  if (Number($("botPick").value) > most) $("botPick").value = String(most);
+  const bots = Number($("botPick").value);
+  const people = seats - bots - 1;
+  if (!bots) {
+    $("seatHint").textContent = "No CPUs: the deal waits until every seat is filled, so a table can sit open while you send the link round.";
+  } else if (!people) {
+    $("seatHint").textContent = `You and ${bots} CPU${bots === 1 ? "" : "s"} — a game on your own, so you can deal the moment you like.`;
+  } else {
+    $("seatHint").textContent = `You, ${bots} CPU${bots === 1 ? "" : "s"} and ${people} more ${people === 1 ? "person" : "people"}.`;
+  }
+}
+
 
 const networkish = (error) => error instanceof TypeError || /network|fetch/i.test(error.message || "");
 
@@ -414,6 +455,7 @@ function handle(message) {
   if (S.stolen) return;
   if (message.type === "lobby") {
     S.message = null;
+    S.lobby = message;
     renderWait(message);
     return;
   }
@@ -495,30 +537,63 @@ function renderWait(message) {
   S.code = message.code || S.code;
   S.seat = message.you ?? S.seat;
   const seats = message.presence || [];
-  const joined = seats.filter((s) => s.joined).length;
-  const size = message.seatCount || seats.length;
+  const bots = seats.filter((s) => s.bot).length;
+  // A CPU seat is filled the moment it is dealt in, so only people can be missing.
+  const free = seats.filter((s) => !s.bot && !s.joined).length;
 
   $("waitCode").textContent = S.code;
   $("inviteUrl").textContent = inviteUrl(S.code);
   $("waitSeats").innerHTML = seats
     .map((s, i) => {
       const mine = i === S.seat;
-      const cls = !s.joined ? "empty" : s.live || mine ? "here" : "gone";
-      const status = !s.joined ? "open seat" : s.live ? "here" : mine ? "you" : "away";
+      const cls = s.bot ? "cpu" : !s.joined ? "empty" : s.live || mine ? "here" : "gone";
+      const status = s.bot ? "cpu" : !s.joined ? "open seat" : s.live ? "here" : mine ? "you" : "away";
       return `<div class="s ${cls} ${mine ? "you" : ""}">
         <span class="n">${i + 1}</span>
-        <span>${s.joined ? esc(s.name || `Player ${i + 1}`) : "—"}</span>
+        <span>${s.bot || s.joined ? esc(s.name || `Player ${i + 1}`) : "—"}</span>
         <span class="st">${status}</span>
       </div>`;
     })
     .join("");
 
-  const ready = joined === size;
+  // No seat left for a person: the invite link would only bounce people off a full
+  // table, so take it down and say why instead.
+  $("inviteBox").style.display = free ? "" : "none";
+  S.busy = false; // the lobby message is the acknowledgement of whatever just changed
+  $("addCpu").disabled = free === 0;
+  $("removeCpu").disabled = bots === 0;
+
+  const ready = free === 0;
   $("dealBtn").disabled = !ready;
-  $("dealBtn").textContent = ready ? "Deal the first hand" : `Waiting for ${size - joined} more`;
+  $("dealBtn").textContent = ready ? "Deal the first hand" : `Waiting for ${free} more`;
+  $("waitHint").innerHTML = bots && !free
+    ? `You and ${bots} CPU${bots === 1 ? "" : "s"}. <b>Deal</b> when you are ready — the CPUs play themselves.`
+    : "The deal waits for every seat. Once everyone is in, anyone can press <b>Deal</b>.";
   screen("paneWait");
   setConn("live", "ok");
 }
+
+async function setCpus(count) {
+  // One request at a time: the count comes from the last lobby message, so a second
+  // click before that arrives would ask for the same number again and appear to do
+  // nothing. The buttons come back when the broadcast lands.
+  if (S.busy) return;
+  S.busy = true;
+  $("addCpu").disabled = true;
+  $("removeCpu").disabled = true;
+  try {
+    await api(
+      `/api/bots?room=${encodeURIComponent(S.code)}&token=${encodeURIComponent(S.token)}&bots=${count}`,
+      { method: "POST" },
+    );
+  } catch (error) {
+    fail("waitErr", error.message);
+    S.busy = false;
+    $("addCpu").disabled = false;
+    $("removeCpu").disabled = false;
+  }
+}
+
 
 /* ── the table ─────────────────────────────────────────────────────── */
 
@@ -558,7 +633,11 @@ function renderBoard(message, force = false) {
   $("dealNum").textContent = view.deal;
   $("dealTotal").textContent = view.deals;
   $("scDeal").textContent = `deal ${view.deal} of ${view.deals}`;
-  $("turnSub").textContent = `${view.seats.length} at the table`;
+  const cpus = view.seats.filter((s) => s.bot).length;
+  const people = view.seats.length - cpus;
+  $("turnSub").textContent = cpus
+    ? `${people === 1 ? "solo" : `${people} people`} · ${cpus} cpu${cpus === 1 ? "" : "s"}`
+    : `${people} at the table`;
 
   /* scorecard — deals won, you in white */
   $("scorecard").innerHTML =
@@ -574,9 +653,11 @@ function renderBoard(message, force = false) {
     .map((other) => {
       const turn = view.turn === other.seat && phase !== "done";
       const live = S.presence[other.seat] ? S.presence[other.seat].live : true;
-      return `<div class="seat${turn ? " turn" : ""}">` +
+      const cpu = other.bot ? '<span class="chip">cpu</span>' : "";
+      return `<div class="seat${turn ? " turn" : ""}${other.bot ? " cpu" : ""}">` +
         `<span class="dot${live ? "" : " away"}"></span>` +
         `<span class="who${live ? "" : " away"}">${esc(other.name)}</span>` +
+        cpu +
         `<span class="th">${other.count} cards${turn ? " · playing" : ""}</span></div>`;
     })
     .join("");
@@ -805,6 +886,15 @@ $("tabJoin").addEventListener("click", () => {
 $("createBtn").addEventListener("click", createTable);
 $("joinBtn").addEventListener("click", joinTable);
 $("dealBtn").addEventListener("click", deal);
+
+for (const id of ["seatPick", "botPick"]) $(id).addEventListener("change", syncCpuOptions);
+syncCpuOptions();
+
+/** How many CPUs are seated right now — the lobby message is the only place that knows. */
+const cpuCount = () => ((S.lobby && S.lobby.presence) || []).filter((s) => s.bot).length;
+
+$("addCpu").addEventListener("click", () => setCpus(cpuCount() + 1));
+$("removeCpu").addEventListener("click", () => setCpus(Math.max(0, cpuCount() - 1)));
 
 /**
  * Copy, on http or https. `navigator.clipboard` only exists in a secure context, and a

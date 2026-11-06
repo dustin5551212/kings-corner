@@ -144,23 +144,34 @@ def _start_deal(state: State) -> None:
     _push_log(state, f"deal {state.deal} — {state.seats[state.turn]['name']} leads", True)
 
 
+def _seat_spec(spec: Any, index: int) -> tuple[str, bool]:
+    """One seat, however it arrived: a name, a dict, or nothing at all.
+
+    A dict may carry ``bot`` — the seat is played by :mod:`kings_corner.policy`
+    instead of a person.  The rules never look at it; the server does.
+    """
+    if isinstance(spec, dict):
+        name = spec.get("name")
+        return (name if isinstance(name, str) and name else f"Player {index + 1}", bool(spec.get("bot")))
+    if isinstance(spec, str) and spec:
+        return spec, False
+    return f"Player {index + 1}", False
+
+
 def create_match(seats: Any = None, seed: int | None = None, deals: int = DEALS) -> State:
     if isinstance(seats, (list, tuple)):
         count = len(seats)
-        names = [
-            s if isinstance(s, str) else (s.get("name") if isinstance(s, dict) else None) or f"Player {i + 1}"
-            for i, s in enumerate(seats)
-        ]
+        specs = [_seat_spec(s, i) for i, s in enumerate(seats)]
     else:
         count = int(seats or 0)
-        names = [f"Player {i + 1}" for i in range(count)]
+        specs = [(f"Player {i + 1}", False) for i in range(count)]
     if count < MIN_SEATS or count > MAX_SEATS:
         raise RuleError(f"kings corners needs {MIN_SEATS} to {MAX_SEATS} players, got {count}")
     if int(deals) < 1:
         raise RuleError("a match needs at least one deal")
 
     state = State(
-        seats=[{"name": name, "won": 0} for name in names],
+        seats=[{"name": name, "won": 0, "bot": bot} for name, bot in specs],
         deal=1,
         deals=int(deals),
         dealer=count - 1,
@@ -170,6 +181,12 @@ def create_match(seats: Any = None, seed: int | None = None, deals: int = DEALS)
     )
     _start_deal(state)
     return state
+
+
+def is_bot(state: State, seat: int) -> bool:
+    """True when nobody is sitting there — the policy plays this hand."""
+    return bool(0 <= seat < len(state.seats) and state.seats[seat].get("bot"))
+
 
 
 # ── what builds on what ──────────────────────────────────────────────────

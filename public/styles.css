@@ -49,6 +49,9 @@
   .seat .dot{width:5px;height:5px;border-radius:50%;background:rgba(217,180,100,.28);flex:none}
   .seat.turn .dot{background:var(--gold);box-shadow:0 0 8px rgba(217,180,100,.85)}
   .seat .dot.away{background:rgba(191,90,80,.9);box-shadow:none}
+  .seat .chip{font-size:7.5px;letter-spacing:.16em;text-transform:uppercase;color:#08131f;
+              background:rgba(217,180,100,.72);border-radius:999px;padding:1px 6px;line-height:1.55;
+              flex:none}
 
   /* ── cards ──────────────────────────────────────────────────────── */
   .card{position:relative;width:var(--card-w);height:var(--card-h);border-radius:var(--card-radius);
@@ -248,6 +251,12 @@ select{background-image:none;cursor:pointer}
 .seatlist .s.empty .st{color:rgba(217,180,100,.28)}
 .seatlist .s.here .st{color:rgba(143,224,160,.8)}
 .seatlist .s.gone .st{color:#d98d84}
+.seatlist .s.cpu{color:rgba(243,221,170,.62)}
+.seatlist .s.cpu .st{color:rgba(217,180,100,.72)}
+
+/* Add / remove a CPU: the seating is still being arranged, so these sit with the list. */
+.seatctl{margin:-6px 0 14px}
+.seatctl button{font-size:8.5px;padding:6px 11px}
 
 button, .btn{font-family:inherit;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
   padding:8px 16px;border-radius:999px;border:1px solid rgba(217,180,100,.55);
